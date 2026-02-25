@@ -89,6 +89,44 @@ npx bitbucket-mcp
 
 ## Configuration
 
+### Bitbucket Cloud vs Server
+
+This MCP server supports both **Bitbucket Cloud** and **Bitbucket Server** (self-hosted) instances. The server automatically detects which type you're using based on the URL you provide.
+
+#### Bitbucket Cloud
+
+For Bitbucket Cloud (bitbucket.org), use either:
+
+```bash
+# Option A: Direct API URL (recommended)
+BITBUCKET_URL="https://api.bitbucket.org/2.0"
+BITBUCKET_WORKSPACE="your-workspace"
+
+# Option B: Web URL (auto-converted to API URL)
+BITBUCKET_URL="https://bitbucket.org/your-workspace"
+# Workspace is auto-extracted
+```
+
+#### Bitbucket Server (Self-Hosted)
+
+For self-hosted Bitbucket Server instances, provide either a web URL or API URL:
+
+```bash
+# Option A: Web URL with project/repo path (recommended for auto-detection)
+BITBUCKET_URL="https://devops.example.com/bitbucket/projects/MYPROJECT/repos/myrepo"
+BITBUCKET_PROJECT_KEY="MYPROJECT"  # Optional if included in URL
+
+# Option B: Direct API URL
+BITBUCKET_URL="https://devops.example.com/bitbucket/rest/api/latest"
+BITBUCKET_PROJECT_KEY="MYPROJECT"  # Required when using API URL
+
+# Option C: Base server URL (will add /rest/api/latest automatically)
+BITBUCKET_URL="https://devops.example.com/bitbucket"
+BITBUCKET_PROJECT_KEY="MYPROJECT"
+```
+
+**Note**: For Bitbucket Server, use `BITBUCKET_PROJECT_KEY` instead of `BITBUCKET_WORKSPACE`.
+
 ### Environment Variables
 
 Configure the server using the following environment variables:
@@ -99,7 +137,8 @@ Configure the server using the following environment variables:
 | `BITBUCKET_USERNAME`         | Your Bitbucket username                                                        | Yes\*    |
 | `BITBUCKET_PASSWORD`         | Your Bitbucket app password                                                    | Yes\*    |
 | `BITBUCKET_TOKEN`            | Your Bitbucket access token (alternative to username/password)                 | No       |
-| `BITBUCKET_WORKSPACE`        | Default workspace to use. If omitted and `BITBUCKET_URL` contains it, auto-set | No       |
+| `BITBUCKET_WORKSPACE`        | Default workspace (Cloud only). Auto-set if URL contains it                    | No       |
+| `BITBUCKET_PROJECT_KEY`      | Default project key (Server only). Auto-set if URL contains it                 | No       |
 | `BITBUCKET_ENABLE_DANGEROUS` | Set to `true` to enable dangerous tools (e.g., deletions). Default: disabled   | No       |
 | `BITBUCKET_LOG_DISABLE`      | Disable file logging when set to `true`/`1`                                    | No       |
 | `BITBUCKET_LOG_FILE`         | Absolute path to a specific log file                                           | No       |
@@ -163,6 +202,8 @@ To integrate this MCP server with Cursor:
 3. Click on "Model Context Protocol"
 4. Add a new MCP configuration:
 
+### Bitbucket Cloud Configuration
+
 ```json
 "bitbucket": {
   "command": "npx",
@@ -176,8 +217,23 @@ To integrate this MCP server with Cursor:
 }
 ```
 
-1. Save the configuration
-2. Use the "/bitbucket" command in Cursor to access Bitbucket repositories and pull requests
+### Bitbucket Server Configuration
+
+```json
+"bitbucket-server": {
+  "command": "npx",
+  "env": {
+    "BITBUCKET_URL": "https://example.com/bitbucket/projects/MYPROJECT/repos/myrepo",
+    "BITBUCKET_PROJECT_KEY": "MYPROJECT",
+    "BITBUCKET_USERNAME": "your-username",
+    "BITBUCKET_PASSWORD": "your-password"
+  },
+  "args": ["-y", "bitbucket-mcp@latest"]
+}
+```
+
+5. Save the configuration
+6. Use the "/bitbucket" command in Cursor to access Bitbucket repositories and pull requests
 
 ### Using a Local Build with Cursor
 

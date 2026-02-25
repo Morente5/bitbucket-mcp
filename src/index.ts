@@ -113,6 +113,14 @@ const LEGACY_LIMIT_SCHEMA = {
 
 // =========== TYPE DEFINITIONS ===========
 /**
+ * Bitbucket server type
+ */
+enum BitbucketType {
+  CLOUD = "cloud",
+  SERVER = "server",
+}
+
+/**
  * Represents a Bitbucket repository
  */
 interface BitbucketRepository {
@@ -317,10 +325,12 @@ interface BitbucketProjectBranchingModel {
 
 interface BitbucketConfig {
   baseUrl: string;
+  type: BitbucketType;
   token?: string;
   username?: string;
   password?: string;
   defaultWorkspace?: string;
+  defaultProjectKey?: string;
   allowDangerousCommands?: boolean;
 }
 
@@ -339,25 +349,251 @@ function normalizeBitbucketConfig(rawConfig: BitbucketConfig): BitbucketConfig {
         normalizedConfig.defaultWorkspace = segments[0];
       }
       normalizedConfig.baseUrl = "https://api.bitbucket.org/2.0";
+      normalizedConfig.type = BitbucketType.CLOUD;
     }
 
     // If users provide https://api.bitbucket.org (without /2.0), ensure /2.0
-    if (host === "api.bitbucket.org") {
+    else if (host === "api.bitbucket.org") {
       const pathname = parsed.pathname.replace(/\/+$/, "");
       if (!pathname.startsWith("/2.0")) {
         normalizedConfig.baseUrl = "https://api.bitbucket.org/2.0";
       } else {
         normalizedConfig.baseUrl = "https://api.bitbucket.org/2.0";
       }
+      normalizedConfig.type = BitbucketType.CLOUD;
+    }
+
+    // Detect Bitbucket Server (self-hosted) by checking for /projects/ or /rest/ in path
+    else {
+      const pathname = parsed.pathname;
+      
+      // If users provide a web URL like https://server/bitbucket/projects/KEY/repos/REPO
+      // extract the project key and convert to API URL
+      if (pathname.includes("/projects/")) {
+        const projectMatch = pathname.match(/\/projects\/([^\/]+)/);
+        if (projectMatch && !normalizedConfig.defaultProjectKey) {
+          normalizedConfig.defaultProjectKey = projectMatch[1];
+        }
+        
+        // Build the API base URL from the server URL
+        // Remove /projects/* and /repos/* paths
+        const basePathMatch = pathname.match(/^(.*)\/projects\//);
+        const basePath = basePathMatch ? basePathMatch[1] : "/bitbucket";
+        normalizedConfig.baseUrl = `${parsed.protocol}//${parsed.host}${basePath}/rest/api/latest`;
+      } 
+      // If already an API URL with /rest/api/
+      else if (pathname.includes("/rest/api")) {
+        // Ensure it ends with /rest/api/latest or /rest/api/1.0
+        const restMatch = pathname.match(/^(.*)\/rest\/api\/(\d+\.\d+|latest)/);
+        if (restMatch) {
+          normalizedConfig.baseUrl = `${parsed.protocol}//${parsed.host}${restMatch[0]}`;
+        } else {
+          // Add /latest if not specified
+          const basePath = pathname.replace(/\/rest\/api.*$/, "");
+          normalizedConfig.baseUrl = `${parsed.protocol}//${parsed.host}${basePath}/rest/api/latest`;
+        }
+      }
+      // Assume it's a Bitbucket Server base URL and add /rest/api/latest
+      else {
+        const basePath = pathname.replace(/\/+$/, "") || "/bitbucket";
+        normalizedConfig.baseUrl = `${parsed.protocol}//${parsed.host}${basePath}/rest/api/latest`;
+      }
+      
+      normalizedConfig.type = BitbucketType.SERVER;
     }
 
     // Remove trailing slashes for a consistent axios baseURL
     normalizedConfig.baseUrl = normalizedConfig.baseUrl.replace(/\/+$/, "");
   } catch {
     // If baseUrl is not a valid absolute URL, keep as-is (custom/self-hosted cases)
+    // Assume Cloud by default
+    if (!normalizedConfig.type) {
+      normalizedConfig.type = BitbucketType.CLOUD;
+    }
   }
 
   return normalizedConfig;
+}
+
+/**
+ * URL builder helpers for different Bitbucket APIs
+ */
+class BitbucketUrlBuilder {
+  private type: BitbucketType;
+
+  constructor(type: BitbucketType) {
+    this.type = type;
+  }
+
+  /**
+   * Build URL for listing repositories
+   * Cloud: /repositories/{workspace}
+   * Server: /projects/{projectKey}/repos
+   */
+  listRepositories(workspace: string): string {
+    if (this.type === BitbucketType.CLOUD) {
+      return `/repositories/${workspace}`;
+    } else {
+      // In Server, workspace is the project key
+      return `/projects/${workspace}/repos`;
+    }
+  }
+
+  /**
+   * Build URL for getting a repository
+   * Cloud: /repositories/{workspace}/{repo_slug}
+   * Server: /projects/{projectKey}/repos/{repoSlug}
+   */
+  getRepository(workspace: string, repoSlug: string): string {
+    if (this.type === BitbucketType.CLOUD) {
+      return `/repositories/${workspace}/${repoSlug}`;
+    } else {
+      return `/projects/${workspace}/repos/${repoSlug}`;
+    }
+  }
+
+  /**
+   * Build URL for pull requests list
+   * Cloud: /repositories/{workspace}/{repo_slug}/pullrequests
+   * Server: /projects/{projectKey}/repos/{repoSlug}/pull-requests
+   */
+  pullRequestsList(workspace: string, repoSlug: string): string {
+    if (this.type === BitbucketType.CLOUD) {
+      return `/repositories/${workspace}/${repoSlug}/pullrequests`;
+    } else {
+      return `/projects/${workspace}/repos/${repoSlug}/pull-requests`;
+    }
+  }
+
+  /**
+   * Build URL for a single pull request
+   * Cloud: /repositories/{workspace}/{repo_slug}/pullrequests/{id}
+   * Server: /projects/{projectKey}/repos/{repoSlug}/pull-requests/{id}
+   */
+  pullRequest(workspace: string, repoSlug: string, prId: number): string {
+    if (this.type === BitbucketType.CLOUD) {
+      return `/repositories/${workspace}/${repoSlug}/pullrequests/${prId}`;
+    } else {
+      return `/projects/${workspace}/repos/${repoSlug}/pull-requests/${prId}`;
+    }
+  }
+
+  /**
+   * Build URL for pull request activity
+   * Cloud: /repositories/{workspace}/{repo_slug}/pullrequests/{id}/activity
+   * Server: /projects/{projectKey}/repos/{repoSlug}/pull-requests/{id}/activities
+   */
+  pullRequestActivity(workspace: string, repoSlug: string, prId: number): string {
+    if (this.type === BitbucketType.CLOUD) {
+      return `/repositories/${workspace}/${repoSlug}/pullrequests/${prId}/activity`;
+    } else {
+      return `/projects/${workspace}/repos/${repoSlug}/pull-requests/${prId}/activities`;
+    }
+  }
+
+  /**
+   * Build URL for approving a pull request
+   * Cloud: /repositories/{workspace}/{repo_slug}/pullrequests/{id}/approve
+   * Server: /projects/{projectKey}/repos/{repoSlug}/pull-requests/{id}/approve
+   */
+  pullRequestApprove(workspace: string, repoSlug: string, prId: number): string {
+    if (this.type === BitbucketType.CLOUD) {
+      return `/repositories/${workspace}/${repoSlug}/pullrequests/${prId}/approve`;
+    } else {
+      return `/projects/${workspace}/repos/${repoSlug}/pull-requests/${prId}/approve`;
+    }
+  }
+
+  /**
+   * Build URL for declining a pull request
+   * Cloud: /repositories/{workspace}/{repo_slug}/pullrequests/{id}/decline
+   * Server: /projects/{projectKey}/repos/{repoSlug}/pull-requests/{id}/decline
+   */
+  pullRequestDecline(workspace: string, repoSlug: string, prId: number): string {
+    if (this.type === BitbucketType.CLOUD) {
+      return `/repositories/${workspace}/${repoSlug}/pullrequests/${prId}/decline`;
+    } else {
+      return `/projects/${workspace}/repos/${repoSlug}/pull-requests/${prId}/decline`;
+    }
+  }
+
+  /**
+   * Build URL for merging a pull request
+   * Cloud: /repositories/{workspace}/{repo_slug}/pullrequests/{id}/merge
+   * Server: /projects/{projectKey}/repos/{repoSlug}/pull-requests/{id}/merge
+   */
+  pullRequestMerge(workspace: string, repoSlug: string, prId: number): string {
+    if (this.type === BitbucketType.CLOUD) {
+      return `/repositories/${workspace}/${repoSlug}/pullrequests/${prId}/merge`;
+    } else {
+      return `/projects/${workspace}/repos/${repoSlug}/pull-requests/${prId}/merge`;
+    }
+  }
+
+  /**
+   * Build URL for pull request comments
+   * Cloud: /repositories/{workspace}/{repo_slug}/pullrequests/{id}/comments
+   * Server: /projects/{projectKey}/repos/{repoSlug}/pull-requests/{id}/comments
+   */
+  pullRequestComments(workspace: string, repoSlug: string, prId: number): string {
+    if (this.type === BitbucketType.CLOUD) {
+      return `/repositories/${workspace}/${repoSlug}/pullrequests/${prId}/comments`;
+    } else {
+      return `/projects/${workspace}/repos/${repoSlug}/pull-requests/${prId}/comments`;
+    }
+  }
+
+  /**
+   * Build URL for a single comment
+   * Cloud: /repositories/{workspace}/{repo_slug}/pullrequests/{id}/comments/{commentId}
+   * Server: /projects/{projectKey}/repos/{repoSlug}/pull-requests/{id}/comments/{commentId}
+   */
+  pullRequestComment(workspace: string, repoSlug: string, prId: number, commentId: number): string {
+    if (this.type === BitbucketType.CLOUD) {
+      return `/repositories/${workspace}/${repoSlug}/pullrequests/${prId}/comments/${commentId}`;
+    } else {
+      return `/projects/${workspace}/repos/${repoSlug}/pull-requests/${prId}/comments/${commentId}`;
+    }
+  }
+
+  /**
+   * Build URL for pull request diff
+   * Cloud: /repositories/{workspace}/{repo_slug}/pullrequests/{id}/diff
+   * Server: /projects/{projectKey}/repos/{repoSlug}/pull-requests/{id}/diff
+   */
+  pullRequestDiff(workspace: string, repoSlug: string, prId: number): string {
+    if (this.type === BitbucketType.CLOUD) {
+      return `/repositories/${workspace}/${repoSlug}/pullrequests/${prId}/diff`;
+    } else {
+      return `/projects/${workspace}/repos/${repoSlug}/pull-requests/${prId}/diff`;
+    }
+  }
+
+  /**
+   * Build URL for pull request patch
+   * Cloud: /repositories/{workspace}/{repo_slug}/pullrequests/{id}/patch
+   * Server: /projects/{projectKey}/repos/{repoSlug}/pull-requests/{id}.patch
+   */
+  pullRequestPatch(workspace: string, repoSlug: string, prId: number): string {
+    if (this.type === BitbucketType.CLOUD) {
+      return `/repositories/${workspace}/${repoSlug}/pullrequests/${prId}/patch`;
+    } else {
+      return `/projects/${workspace}/repos/${repoSlug}/pull-requests/${prId}.patch`;
+    }
+  }
+
+  /**
+   * Build URL for pull request commits
+   * Cloud: /repositories/{workspace}/{repo_slug}/pullrequests/{id}/commits
+   * Server: /projects/{projectKey}/repos/{repoSlug}/pull-requests/{id}/commits
+   */
+  pullRequestCommits(workspace: string, repoSlug: string, prId: number): string {
+    if (this.type === BitbucketType.CLOUD) {
+      return `/repositories/${workspace}/${repoSlug}/pullrequests/${prId}/commits`;
+    } else {
+      return `/projects/${workspace}/repos/${repoSlug}/pull-requests/${prId}/commits`;
+    }
+  }
 }
 
 /**
@@ -475,6 +711,7 @@ class BitbucketServer {
   private readonly api: AxiosInstance;
   private readonly config: BitbucketConfig;
   private readonly paginator: BitbucketPaginator;
+  private readonly urlBuilder: BitbucketUrlBuilder;
   private readonly dangerousToolNames = new Set<string>([
     "deletePullRequestComment",
     "deletePullRequestTask",
@@ -503,22 +740,27 @@ class BitbucketServer {
     // Configuration from environment variables
     const initialConfig: BitbucketConfig = {
       baseUrl: process.env.BITBUCKET_URL ?? "https://api.bitbucket.org/2.0",
+      type: BitbucketType.CLOUD, // Will be detected in normalization
       token: process.env.BITBUCKET_TOKEN,
       username: process.env.BITBUCKET_USERNAME,
       password: process.env.BITBUCKET_PASSWORD,
       defaultWorkspace: process.env.BITBUCKET_WORKSPACE,
+      defaultProjectKey: process.env.BITBUCKET_PROJECT_KEY,
     };
 
     const normalizedConfig = normalizeBitbucketConfig(initialConfig);
 
     if (
       normalizedConfig.baseUrl !== initialConfig.baseUrl ||
-      normalizedConfig.defaultWorkspace !== initialConfig.defaultWorkspace
+      normalizedConfig.defaultWorkspace !== initialConfig.defaultWorkspace ||
+      normalizedConfig.type !== initialConfig.type
     ) {
       logger.info("Normalized Bitbucket configuration", {
         fromBaseUrl: initialConfig.baseUrl,
         toBaseUrl: normalizedConfig.baseUrl,
+        type: normalizedConfig.type,
         defaultWorkspace: normalizedConfig.defaultWorkspace,
+        defaultProjectKey: normalizedConfig.defaultProjectKey,
       });
     }
 
@@ -562,6 +804,7 @@ class BitbucketServer {
     });
 
     this.paginator = new BitbucketPaginator(this.api, logger);
+    this.urlBuilder = new BitbucketUrlBuilder(this.config.type);
 
     // Setup tool handlers using the request handler pattern
     this.setupToolHandlers();
@@ -2290,13 +2533,14 @@ class BitbucketServer {
     legacyLimit?: number
   ) {
     try {
-      // Use default workspace if not provided
-      const wsName = workspace || this.config.defaultWorkspace;
+      // Use default workspace (Cloud) or project key (Server) if not provided
+      const wsName = workspace || this.config.defaultWorkspace || this.config.defaultProjectKey;
 
       if (!wsName) {
+        const paramName = this.config.type === BitbucketType.CLOUD ? "BITBUCKET_WORKSPACE" : "BITBUCKET_PROJECT_KEY";
         throw new McpError(
           ErrorCode.InvalidParams,
-          "Workspace must be provided either as a parameter or through BITBUCKET_WORKSPACE environment variable"
+          `Workspace/Project must be provided either as a parameter or through ${paramName} environment variable`
         );
       }
 
@@ -2310,11 +2554,16 @@ class BitbucketServer {
 
       const params: Record<string, any> = {};
       if (name) {
-        params.q = `name~"${name}"`;
+        // Cloud uses query syntax, Server uses name parameter
+        if (this.config.type === BitbucketType.CLOUD) {
+          params.q = `name~"${name}"`;
+        } else {
+          params.name = name;
+        }
       }
 
       const repositories = await this.paginator.fetchValues<BitbucketRepository>(
-        `/repositories/${wsName}`,
+        this.urlBuilder.listRepositories(wsName),
         {
           pagelen: pagelen ?? legacyLimit,
           page,
@@ -2351,7 +2600,7 @@ class BitbucketServer {
       });
 
       const response = await this.api.get(
-        `/repositories/${workspace}/${repo_slug}`
+        this.urlBuilder.getRepository(workspace, repo_slug)
       );
 
       return {
@@ -2432,7 +2681,7 @@ class BitbucketServer {
       }
 
       const result = await this.paginator.fetchValues<BitbucketPullRequest>(
-        `/repositories/${workspace}/${repo_slug}/pullrequests`,
+        this.urlBuilder.pullRequestsList(workspace, repo_slug),
         {
           pagelen: pagelen ?? legacyLimit,
           page,
@@ -2529,7 +2778,7 @@ class BitbucketServer {
 
       // Create the pull request
       const response = await this.api.post(
-        `/repositories/${workspace}/${repo_slug}/pullrequests`,
+        this.urlBuilder.pullRequestsList(workspace, repo_slug),
         requestPayload
       );
 
@@ -2569,7 +2818,7 @@ class BitbucketServer {
       });
 
       const response = await this.api.get(
-        `/repositories/${workspace}/${repo_slug}/pullrequests/${pull_request_id}`
+        this.urlBuilder.pullRequest(workspace, repo_slug, parseInt(pull_request_id))
       );
 
       return {
@@ -2616,7 +2865,7 @@ class BitbucketServer {
       if (description !== undefined) updateData.description = description;
 
       const response = await this.api.put(
-        `/repositories/${workspace}/${repo_slug}/pullrequests/${pull_request_id}`,
+        this.urlBuilder.pullRequest(workspace, repo_slug, parseInt(pull_request_id)),
         updateData
       );
 
@@ -2663,7 +2912,7 @@ class BitbucketServer {
       });
 
       const result = await this.paginator.fetchValues(
-        `/repositories/${workspace}/${repo_slug}/pullrequests/${pull_request_id}/activity`,
+        this.urlBuilder.pullRequestActivity(workspace, repo_slug, parseInt(pull_request_id)),
         {
           pagelen,
           page,
@@ -2709,7 +2958,7 @@ class BitbucketServer {
       });
 
       const response = await this.api.post(
-        `/repositories/${workspace}/${repo_slug}/pullrequests/${pull_request_id}/approve`
+        this.urlBuilder.pullRequestApprove(workspace, repo_slug, parseInt(pull_request_id))
       );
 
       return {
@@ -2749,7 +2998,7 @@ class BitbucketServer {
       });
 
       const response = await this.api.delete(
-        `/repositories/${workspace}/${repo_slug}/pullrequests/${pull_request_id}/approve`
+        this.urlBuilder.pullRequestApprove(workspace, repo_slug, parseInt(pull_request_id))
       );
 
       return {
@@ -2793,7 +3042,7 @@ class BitbucketServer {
       const data = message ? { message } : {};
 
       const response = await this.api.post(
-        `/repositories/${workspace}/${repo_slug}/pullrequests/${pull_request_id}/decline`,
+        this.urlBuilder.pullRequestDecline(workspace, repo_slug, parseInt(pull_request_id)),
         data
       );
 
@@ -2842,7 +3091,7 @@ class BitbucketServer {
       if (strategy) data.merge_strategy = strategy;
 
       const response = await this.api.post(
-        `/repositories/${workspace}/${repo_slug}/pullrequests/${pull_request_id}/merge`,
+        this.urlBuilder.pullRequestMerge(workspace, repo_slug, parseInt(pull_request_id)),
         data
       );
 
@@ -2889,7 +3138,7 @@ class BitbucketServer {
       });
 
       const result = await this.paginator.fetchValues(
-        `/repositories/${workspace}/${repo_slug}/pullrequests/${pull_request_id}/comments`,
+        this.urlBuilder.pullRequestComments(workspace, repo_slug, parseInt(pull_request_id)),
         {
           pagelen,
           page,
@@ -2936,15 +3185,21 @@ class BitbucketServer {
 
       // First get the pull request details to extract commit information
       const prResponse = await this.api.get(
-        `/repositories/${workspace}/${repo_slug}/pullrequests/${pull_request_id}`
+        this.urlBuilder.pullRequest(workspace, repo_slug, parseInt(pull_request_id))
       );
 
       const sourceCommit = prResponse.data.source.commit.hash;
       const destinationCommit = prResponse.data.destination.commit.hash;
 
-      // Construct the correct diff URL with the proper format
-      // The format is: /repositories/{workspace}/{repo_slug}/diff/{source_repo}:{source_commit}%0D{destination_commit}?from_pullrequest_id={pr_id}&topic=true
-      const diffUrl = `/repositories/${workspace}/${repo_slug}/diff/${workspace}/${repo_slug}:${sourceCommit}%0D${destinationCommit}?from_pullrequest_id=${pull_request_id}&topic=true`;
+      // Construct the diff URL - different for Cloud vs Server
+      let diffUrl: string;
+      if (this.config.type === BitbucketType.CLOUD) {
+        // Cloud format: /repositories/{workspace}/{repo_slug}/diff/{source_repo}:{source_commit}%0D{destination_commit}?from_pullrequest_id={pr_id}&topic=true
+        diffUrl = `/repositories/${workspace}/${repo_slug}/diff/${workspace}/${repo_slug}:${sourceCommit}%0D${destinationCommit}?from_pullrequest_id=${pull_request_id}&topic=true`;
+      } else {
+        // Server uses the PR diff endpoint directly
+        diffUrl = this.urlBuilder.pullRequestDiff(workspace, repo_slug, parseInt(pull_request_id));
+      }
 
       const response = await this.api.get(diffUrl, {
         headers: {
@@ -2997,7 +3252,7 @@ class BitbucketServer {
       });
 
       const result = await this.paginator.fetchValues(
-        `/repositories/${workspace}/${repo_slug}/pullrequests/${pull_request_id}/commits`,
+        this.urlBuilder.pullRequestCommits(workspace, repo_slug, parseInt(pull_request_id)),
         {
           pagelen,
           page,
@@ -3074,7 +3329,7 @@ class BitbucketServer {
       }
 
       const response = await this.api.post(
-        `/repositories/${workspace}/${repo_slug}/pullrequests/${pull_request_id}/comments`,
+        this.urlBuilder.pullRequestComments(workspace, repo_slug, parseInt(pull_request_id)),
         commentData
       );
 
@@ -4338,7 +4593,7 @@ class BitbucketServer {
       });
 
       const response = await this.api.get(
-        `/repositories/${workspace}/${repo_slug}/pullrequests/${pull_request_id}/comments/${comment_id}`
+        this.urlBuilder.pullRequestComment(workspace, repo_slug, parseInt(pull_request_id), parseInt(comment_id))
       );
 
       return {
@@ -4382,7 +4637,7 @@ class BitbucketServer {
       });
 
       const response = await this.api.put(
-        `/repositories/${workspace}/${repo_slug}/pullrequests/${pull_request_id}/comments/${comment_id}`,
+        this.urlBuilder.pullRequestComment(workspace, repo_slug, parseInt(pull_request_id), parseInt(comment_id)),
         {
           content: { raw: content },
         }
@@ -4425,7 +4680,7 @@ class BitbucketServer {
       });
 
       await this.api.delete(
-        `/repositories/${workspace}/${repo_slug}/pullrequests/${pull_request_id}/comments/${comment_id}`
+        this.urlBuilder.pullRequestComment(workspace, repo_slug, parseInt(pull_request_id), parseInt(comment_id))
       );
 
       return {
