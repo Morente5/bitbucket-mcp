@@ -366,7 +366,7 @@ function normalizeBitbucketConfig(rawConfig: BitbucketConfig): BitbucketConfig {
     // Detect Bitbucket Server (self-hosted) by checking for /projects/ or /rest/ in path
     else {
       const pathname = parsed.pathname;
-      
+
       // If users provide a web URL like https://server/bitbucket/projects/KEY/repos/REPO
       // extract the project key and convert to API URL
       if (pathname.includes("/projects/")) {
@@ -374,13 +374,13 @@ function normalizeBitbucketConfig(rawConfig: BitbucketConfig): BitbucketConfig {
         if (projectMatch && !normalizedConfig.defaultProjectKey) {
           normalizedConfig.defaultProjectKey = projectMatch[1];
         }
-        
+
         // Build the API base URL from the server URL
         // Remove /projects/* and /repos/* paths
         const basePathMatch = pathname.match(/^(.*)\/projects\//);
         const basePath = basePathMatch ? basePathMatch[1] : "/bitbucket";
         normalizedConfig.baseUrl = `${parsed.protocol}//${parsed.host}${basePath}/rest/api/latest`;
-      } 
+      }
       // If already an API URL with /rest/api/
       else if (pathname.includes("/rest/api")) {
         // Ensure it ends with /rest/api/latest or /rest/api/1.0
@@ -398,7 +398,7 @@ function normalizeBitbucketConfig(rawConfig: BitbucketConfig): BitbucketConfig {
         const basePath = pathname.replace(/\/+$/, "") || "/bitbucket";
         normalizedConfig.baseUrl = `${parsed.protocol}//${parsed.host}${basePath}/rest/api/latest`;
       }
-      
+
       normalizedConfig.type = BitbucketType.SERVER;
     }
 
@@ -3429,29 +3429,40 @@ class BitbucketServer {
       });
 
       // Prepare the comment data
-      const commentData: any = {
-        content: {
-          raw: content,
-        },
-      };
+      // Bitbucket Server uses { text } while Cloud uses { content: { raw } }
+      const commentData: any =
+        this.config.type === BitbucketType.SERVER
+          ? { text: content }
+          : { content: { raw: content } };
 
-      // Add pending flag if provided
-      if (pending !== undefined) {
+      // Add pending flag if provided (Cloud only)
+      if (pending !== undefined && this.config.type !== BitbucketType.SERVER) {
         commentData.pending = pending;
       }
 
       // Add inline information if provided
       if (inline) {
-        commentData.inline = {
-          path: inline.path,
-        };
-
-        // Add line number information based on the type
-        if (inline.from !== undefined) {
-          commentData.inline.from = inline.from;
-        }
-        if (inline.to !== undefined) {
-          commentData.inline.to = inline.to;
+        if (this.config.type === BitbucketType.SERVER) {
+          // Bitbucket Server uses "anchor" with line/lineType/fileType
+          const isFromLine = inline.from !== undefined && inline.to === undefined;
+          commentData.anchor = {
+            path: inline.path,
+            srcPath: inline.path,
+            fileType: isFromLine ? "FROM" : "TO",
+            lineType: "CONTEXT",
+            line: inline.to ?? inline.from,
+          };
+        } else {
+          // Bitbucket Cloud uses "inline" with to/from
+          commentData.inline = {
+            path: inline.path,
+          };
+          if (inline.from !== undefined) {
+            commentData.inline.from = inline.from;
+          }
+          if (inline.to !== undefined) {
+            commentData.inline.to = inline.to;
+          }
         }
       }
 
