@@ -257,6 +257,72 @@ interface InlineCommentInline {
   to?: number;
 }
 
+interface PullRequestCommentCodeContext {
+  line?: number;
+  content?: string;
+  type?: string;
+}
+
+interface PullRequestComment {
+  id: number;
+  text?: string;
+  content?: {
+    raw: string;
+  };
+  author?: {
+    name: string;
+    displayName?: string;
+  };
+  user?: {
+    display_name: string;
+  };
+  createdDate?: number;
+  created_on?: string;
+  state?: string;
+  threadResolved?: boolean;
+  severity?: string;
+  anchor?: {
+    path: string;
+    line?: number;
+    lineType?: string;
+    fileType?: string;
+  };
+  inline?: {
+    path: string;
+    from?: number;
+    to?: number;
+  };
+  codeContext?: PullRequestCommentCodeContext[];
+}
+
+type PullRequestCommentWithLocation = PullRequestComment & {
+  orphaned?: boolean;
+};
+
+interface PullRequestActivity {
+  action: string;
+  comment?: PullRequestComment;
+  commentAnchor?: {
+    path: string;
+    line?: number;
+    lineType?: string;
+    fileType?: string;
+    orphaned?: boolean;
+  };
+  diff?: {
+    hunks?: Array<{
+      segments?: Array<{
+        type?: string;
+        lines?: Array<{
+          destination?: number;
+          line?: string;
+          commentIds?: number[];
+        }>;
+      }>;
+    }>;
+  };
+}
+
 /**
  * Represents a Bitbucket branching model
  */
@@ -1233,6 +1299,11 @@ class BitbucketServer {
               pull_request_id: {
                 type: "string",
                 description: "Pull request ID",
+              },
+              onlyUnresolved: {
+                type: "boolean",
+                description:
+                  "When true, only return unresolved comment threads",
               },
               ...PAGINATION_BASE_SCHEMA,
               all: PAGINATION_ALL_SCHEMA,
@@ -2360,6 +2431,7 @@ class BitbucketServer {
               args.workspace as string,
               args.repo_slug as string,
               args.pull_request_id as string,
+              args.onlyUnresolved as boolean,
               args.pagelen as number,
               args.page as number,
               args.all as boolean,
@@ -3322,6 +3394,7 @@ class BitbucketServer {
     workspace: string,
     repo_slug: string,
     pull_request_id: string,
+    onlyUnresolved?: boolean,
     pagelen?: number,
     page?: number,
     all?: boolean,
@@ -3331,6 +3404,7 @@ class BitbucketServer {
         workspace,
         repo_slug,
         pull_request_id,
+        onlyUnresolved,
         pagelen,
         page,
         all,
@@ -3340,7 +3414,7 @@ class BitbucketServer {
       // making it unsuitable for fetching all PR comments. Instead, use /activities
       // (which works without extra required params) and extract COMMENTED entries.
       if (this.config.type === BitbucketType.SERVER) {
-        const activitiesResult = await this.paginator.fetchValues<any>(
+        const activitiesResult = await this.paginator.fetchValues<PullRequestActivity>(
           this.urlBuilder.pullRequestActivity(
             workspace,
             repo_slug,
@@ -3358,20 +3432,25 @@ class BitbucketServer {
         // - commentAnchor: file path + line info
         // - codeContext: the specific diff lines referencing this comment (matched by commentId)
         // - orphaned: whether the anchor is outdated/no longer applies
-        const comments = activitiesResult.values
-          .filter((activity: any) => activity.action === "COMMENTED" && activity.comment)
-          .map((activity: any) => {
+        let comments: PullRequestCommentWithLocation[] = activitiesResult.values
+          .filter(
+            (
+              activity,
+            ): activity is PullRequestActivity & { comment: PullRequestComment } =>
+              activity.action === "COMMENTED" && activity.comment !== undefined,
+          )
+          .map((activity) => {
             const comment = activity.comment;
             const commentAnchor = activity.commentAnchor;
             const diff = activity.diff;
             const orphaned = commentAnchor?.orphaned ?? false;
 
             // Extract the diff lines that reference this comment by ID
-            const codeContext: Array<{ line: number; content: string; type: string }> = [];
+            const codeContext: PullRequestCommentCodeContext[] = [];
             if (diff?.hunks) {
               for (const hunk of diff.hunks) {
-                for (const segment of hunk.segments) {
-                  for (const line of segment.lines) {
+                for (const segment of hunk.segments ?? []) {
+                  for (const line of segment.lines ?? []) {
                     if (Array.isArray(line.commentIds) && line.commentIds.includes(comment.id)) {
                       codeContext.push({
                         line: line.destination,
@@ -3400,6 +3479,14 @@ class BitbucketServer {
             };
           });
 
+        if (onlyUnresolved) {
+          comments = comments.filter(
+            (comment) =>
+              comment.state?.toUpperCase() !== "RESOLVED" &&
+              comment.threadResolved !== true,
+          );
+        }
+
         return {
           content: [
             {
@@ -3411,7 +3498,12 @@ class BitbucketServer {
       }
 
       // Cloud: /comments endpoint works normally with pagelen/page.
-      const result = await this.paginator.fetchValues(
+      const params: Record<string, unknown> = {};
+      if (onlyUnresolved) {
+        params.q = "deleted = false AND resolution = null";
+      }
+
+      const result = await this.paginator.fetchValues<PullRequestComment>(
         this.urlBuilder.pullRequestComments(
           workspace,
           repo_slug,
@@ -3421,6 +3513,7 @@ class BitbucketServer {
           pagelen,
           page,
           all,
+          params,
           description: "getPullRequestComments",
         },
       );
